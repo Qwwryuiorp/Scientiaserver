@@ -1,104 +1,96 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from flask_socketio import SocketIO, emit
-from werkzeug.security import generate_password_hash, check_password_hash
-import threading
-import time
+from flask import Flask, request
+from flask_socketio import SocketIO, emit, join_room, leave_room
+import eventlet
+
+eventlet.monkey_patch()
 
 app = Flask(__name__)
-CORS(app)
+app.config['SECRET_KEY'] = 'your-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# In-memory "database"
-users = {}  # { username: password_hash }
-online_clients = {}  # { username: sid }
-rate_limits = {}  # { ip: [timestamps] }
+users = {}  # username -> password
+user_sessions = {}  # sid -> username
 
-# === HELPER: RATE LIMITING ===
-def is_rate_limited(ip):
-    now = time.time()
-    limit = 10  # max requests
-    window = 60  # seconds
-    if ip not in rate_limits:
-        rate_limits[ip] = []
-    rate_limits[ip] = [t for t in rate_limits[ip] if now - t < window]
-    if len(rate_limits[ip]) >= limit:
-        return True
-    rate_limits[ip].append(now)
-    return False
+def is_valid_username(username):
+    return 1 <= len(username) <= 32
 
-# === API: Register ===
-@app.route('/register', methods=['POST'])
-def register():
-    ip = request.remote_addr
-    if is_rate_limited(ip):
-        return jsonify({'status': 'error', 'message': 'Too many requests'}), 429
+@socketio.on('connect')
+def on_connect():
+    print(f"Client connected: {request.sid}")
+    emit('connected', {'message': 'Welcome!'})
 
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+@socketio.on('disconnect')
+def on_disconnect():
+    sid = request.sid
+    username = user_sessions.get(sid)
+    if username:
+        print(f"User disconnected: {username} ({sid})")
+        # Remove user from session and leave room
+        leave_room(username)
+        del user_sessions[sid]
+    else:
+        print(f"Unknown client disconnected: {sid}")
 
-    if not username or not password:
-        return jsonify({'status': 'error', 'message': 'Username and password required'}), 400
+@socketio.on('signup')
+def handle_signup(username, password):
+    sid = request.sid
+    print(f"Signup attempt: {username}")
+
+    if not is_valid_username(username):
+        emit('signup_response', {'success': False, 'error': 'Invalid username.'})
+        return
 
     if username in users:
-        return jsonify({'status': 'error', 'message': 'Username already taken'}), 409
-
-    users[username] = generate_password_hash(password)
-    return jsonify({'status': 'success', 'message': 'Account created'}), 201
-
-# === API: Login ===
-@app.route('/login', methods=['POST'])
-def login():
-    ip = request.remote_addr
-    if is_rate_limited(ip):
-        return jsonify({'status': 'error', 'message': 'Too many requests'}), 429
-
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-
-    if not username or not password:
-        return jsonify({'status': 'error', 'message': 'Username and password required'}), 400
-
-    if username not in users or not check_password_hash(users[username], password):
-        return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
-
-    return jsonify({'status': 'success'}), 200
-
-# === SOCKET: Client identifies who they are ===
-@socketio.on('identify')
-def handle_identify(data):
-    username = data.get('username')
-    if not username:
+        emit('signup_response', {'success': False, 'error': 'Username already exists.'})
         return
-    online_clients[username] = request.sid
-    print(f"{username} connected with SID {request.sid}")
 
-# === SOCKET: Send message ===
-@socketio.on('chat')
-def handle_chat(json):
-    sender = json.get('sender')
-    recipient = json.get('recipient')
-    message = json.get('message')
+    users[username] = password
+    print(f"User registered: {username}")
+    emit('signup_response', {'success': True})
 
-    if recipient in online_clients:
-        emit('chat', json, to=online_clients[recipient])
-    else:
-        print(f"User {recipient} not online")
+@socketio.on('login')
+def handle_login(username, password):
+    sid = request.sid
+    print(f"Login attempt: {username}")
 
-# === SOCKET: Disconnect ===
-@socketio.on('disconnect')
-def handle_disconnect():
-    disconnected = None
-    for user, sid in list(online_clients.items()):
-        if sid == request.sid:
-            disconnected = user
-            del online_clients[user]
-            break
-    if disconnected:
-        print(f"{disconnected} disconnected")
+    if username not in users:
+        emit('login_response', {'success': False, 'error': 'User does not exist.'})
+        return
 
-# === Run Flask Server ===
+    if users[username] != password:
+        emit('login_response', {'success': False, 'error': 'Incorrect password.'})
+        return
+
+    user_sessions[sid] = username
+    join_room(username)  # join a private room named by the username
+    print(f"User logged in: {username}")
+    emit('login_response', {'success': True})
+
+@socketio.on('send_message')
+def handle_send_message(to_user, message):
+    sid = request.sid
+    from_user = user_sessions.get(sid)
+    if not from_user:
+        emit('error', {'error': 'You must be logged in to send messages.'})
+        return
+
+    if not to_user or not message:
+        emit('error', {'error': 'Recipient and message required.'})
+        return
+
+    if to_user not in users:
+        emit('error', {'error': f'User {to_user} does not exist.'})
+        return
+
+    print(f"Message from {from_user} to {to_user}: {message}")
+
+    # Emit message ONLY to recipient's room
+    socketio.emit('receive_message', [from_user, message], room=to_user)
+
+    # Optionally emit message back to sender's client too (for local display)
+    socketio.emit('receive_message', [from_user, message], room=from_user)
+
+    emit('message_sent', {'to': to_user, 'message': message})
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000)
