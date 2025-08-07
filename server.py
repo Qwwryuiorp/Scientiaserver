@@ -1,29 +1,23 @@
 import os
-import eventlet
-eventlet.monkey_patch()
-
-from flask import Flask, request
+from flask import Flask
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 connected_users = {}
-user_accounts = set()
 ADMIN_CODE = "777.9"
 
 @socketio.on('connect_user')
 def connect_user(data):
     username = data.get("username")
     sid = request.sid
-    if username != ADMIN_CODE and username in user_accounts:
-        emit("error", {"message": "User already connected or duplicate account."})
+    if username in connected_users and username != ADMIN_CODE:
+        emit("error", {"message": "Duplicate username."})
         return
     connected_users[username] = sid
-    if username != ADMIN_CODE:
-        user_accounts.add(username)
     emit("connected", {"message": f"{username} connected."})
 
 @socketio.on('send_message')
@@ -39,14 +33,14 @@ def send_message(data):
         else:
             emit("receive_message", {"from": sender, "message": message}, broadcast=True)
         return
-    if sender not in user_accounts:
-        emit("error", {"message": "You are not authorized."})
+    if sender not in connected_users:
+        emit("error", {"message": "Not authorized."})
         return
     if recipient:
         if recipient in connected_users:
             emit("receive_message", {"from": sender, "message": message}, to=connected_users[recipient])
         else:
-            emit("error", {"message": f"User {recipient} not found."})
+            emit("error", {"message": "Recipient not found."})
     else:
         emit("receive_message", {"from": sender, "message": message}, broadcast=True)
 
@@ -56,8 +50,6 @@ def disconnect():
     for user, user_sid in list(connected_users.items()):
         if user_sid == sid:
             connected_users.pop(user)
-            if user != ADMIN_CODE:
-                user_accounts.discard(user)
             break
 
 if __name__ == '__main__':
