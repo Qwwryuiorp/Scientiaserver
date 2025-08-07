@@ -1,37 +1,72 @@
+import os
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-users = {}
+connected_users = {}
+user_accounts = set()
+ADMIN_CODE = "777.9"
 
-@socketio.on('register')
-def register_user(data):
-    username = data['username']
+@socketio.on('connect_user')
+def connect_user(data):
+    username = data.get("username")
     sid = request.sid
-    users[username] = sid
-    print(f"User registered: {username} -> {sid}")
+
+    if username != ADMIN_CODE and username in user_accounts:
+        emit("error", {"message": "User already connected or duplicate account."})
+        return
+
+    connected_users[username] = sid
+    if username != ADMIN_CODE:
+        user_accounts.add(username)
+
+    emit("connected", {"message": f"{username} connected."})
 
 @socketio.on('send_message')
-def handle_send_message(data):
-    sender = data.get('sender')
-    recipient = data.get('recipient')
-    message = data.get('message')
-    if sender == '777.9':
-        for user, sid in users.items():
-            if sid != request.sid:
-                emit('receive_message', {'sender': 'ADMIN', 'message': message}, room=sid)
-    elif recipient == 'GLOBAL':
-        for user, sid in users.items():
-            if sid != request.sid:
-                emit('receive_message', {'sender': sender, 'message': message}, room=sid)
+def send_message(data):
+    sender = data.get("from")
+    recipient = data.get("to")
+    message = data.get("message")
+
+    if not sender or not message:
+        return
+
+    if sender == ADMIN_CODE:
+        if recipient and recipient in connected_users:
+            emit("receive_message", {"from": sender, "message": message}, to=connected_users[recipient])
+        else:
+            emit("receive_message", {"from": sender, "message": message}, broadcast=True)
+        return
+
+    if sender not in user_accounts:
+        emit("error", {"message": "You are not authorized."})
+        return
+
+    if recipient:
+        if recipient in connected_users:
+            emit("receive_message", {"from": sender, "message": message}, to=connected_users[recipient])
+        else:
+            emit("error", {"message": f"User {recipient} not found."})
     else:
-        recipient_sid = users.get(recipient)
-        if recipient_sid:
-            emit('receive_message', {'sender': sender, 'message': message}, room=recipient_sid)
+        emit("receive_message", {"from": sender, "message": message}, broadcast=True)
+
+@socketio.on('disconnect')
+def disconnect():
+    sid = request.sid
+    disconnected_user = None
+
+    for user, user_sid in list(connected_users.items()):
+        if user_sid == sid:
+            disconnected_user = user
+            connected_users.pop(user)
+            if user != ADMIN_CODE:
+                user_accounts.discard(user)
+            break
 
 if __name__ == '__main__':
-    socketio.run(app, port=5000)
+    port = int(os.environ.get("PORT", 10000))
+    socketio.run(app, host='0.0.0.0', port=port)
