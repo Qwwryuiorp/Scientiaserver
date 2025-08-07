@@ -11,4 +11,4 @@ def handle_send_message(message):
     emit('receive_message', message, broadcast=True)
 
 if _name_ == '_main_':
-    socketio.run(app, host='0.0.0.0', port=10000)
+    socketio.run(app, host='0.0.0.0', port=5000)
