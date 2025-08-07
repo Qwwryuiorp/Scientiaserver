@@ -53,10 +53,8 @@ def send_message(data):
 @socketio.on('disconnect')
 def disconnect():
     sid = request.sid
-    disconnected_user = None
     for user, user_sid in list(connected_users.items()):
         if user_sid == sid:
-            disconnected_user = user
             connected_users.pop(user)
             if user != ADMIN_CODE:
                 user_accounts.discard(user)
