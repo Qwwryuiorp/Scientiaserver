@@ -2,58 +2,90 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
-# Setup Flask app and Socket.IO
 app = Flask(_name_)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Store users and their session IDs
-connected_users = {}
+connected_users = {}      # username -> sid
+admin_sid = None          # session ID of admin
 
-# Handle connection
 @socketio.on('connect')
-def on_connect():
+def handle_connect():
     print(f"[CONNECTED] {request.sid}")
 
-# Handle disconnection
 @socketio.on('disconnect')
-def on_disconnect():
+def handle_disconnect():
+    global admin_sid
     sid = request.sid
-    for username in list(connected_users):
-        if connected_users[username] == sid:
-            del connected_users[username]
-            print(f"[DISCONNECTED] {username}")
+    to_remove = None
+
+    for username, user_sid in connected_users.items():
+        if user_sid == sid:
+            to_remove = username
             break
 
-# Register username
+    if to_remove:
+        del connected_users[to_remove]
+        if sid == admin_sid:
+            admin_sid = None
+            print("[ADMIN] Admin disconnected.")
+        else:
+            print(f"[DISCONNECTED] {to_remove}")
+
 @socketio.on('register_username')
-def register_username(data):
-    username = data.get('username')
-    if username:
-        connected_users[username] = request.sid
-        print(f"[REGISTERED] {username} with SID {request.sid}")
+def handle_register_username(data):
+    global admin_sid
+    username = data.get("username")
 
-# Send private message
+    if not username:
+        return
+
+    sid = request.sid
+
+    if username == "777.9":
+        admin_sid = sid
+        connected_users["ADMIN"] = sid
+        print(f"[ADMIN] Admin logged in with SID {sid}")
+        emit("register_success", {"status": "admin"})
+    else:
+        if username in connected_users:
+            emit("register_fail", {"reason": "Username already taken"})
+            return
+        connected_users[username] = sid
+        print(f"[REGISTERED] {username}")
+        emit("register_success", {"status": "user"})
+
 @socketio.on('send_message')
-def send_message(data):
-    sender = data.get('from')
-    recipient = data.get('to')
-    message = data.get('message')
+def handle_send_message(data):
+    sender = data.get("from")
+    recipient = data.get("to")
+    message = data.get("message")
+    sid = request.sid
 
-    print(f"[MESSAGE] {sender} → {recipient}: {message}")
+    if sid == admin_sid:
+        # Broadcast to everyone except admin
+        print(f"[ADMIN BROADCAST] {message}")
+        for user, user_sid in connected_users.items():
+            if user_sid != admin_sid:
+                emit("receive_message", {
+                    "from": "ADMIN",
+                    "message": message
+                }, room=user_sid)
+        return
 
+    # For normal users
     recipient_sid = connected_users.get(recipient)
     if recipient_sid:
-        emit('receive_message', {
-            'from': sender,
-            'message': message
+        print(f"[MESSAGE] {sender} → {recipient}: {message}")
+        emit("receive_message", {
+            "from": sender,
+            "message": message
         }, room=recipient_sid)
     else:
-        print(f"[ERROR] {recipient} not connected.")
+        print(f"[ERROR] Recipient '{recipient}' not connected")
+        emit("error", {"message": f"User '{recipient}' not available"})
 
-# Run the server on default or system-assigned port
-if _name_ == '_main_':
+if _name_ == "_main_":
     import os
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port)
-
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port)
